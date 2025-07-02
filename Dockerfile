@@ -1,28 +1,86 @@
 FROM ubuntu:22.04
 
+# Install dependencies
 RUN apt update -y && \
-    DEBIAN_FRONTEND=noninteractive apt install -y apache2 \
+    DEBIAN_FRONTEND=noninteractive apt install -y \
+    apache2 \
     php \
-    npm \
     php-xml \
     php-mbstring \
     php-curl \
     php-mysql \
     php-gd \
+    php-bcmath \
+    php-json \
+    php-zip \
+    npm \
     unzip \
-    nano  \
-    curl
-RUN curl -sS https://getcomposer.org/installer -o composer-setup.php && \
-    php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+    nano \
+    curl \
+    git
 
-RUN mkdir /var/www/sosmed
-ADD . /var/www/sosmed
-ADD sosmed.conf /etc/apache2/sites-available/
-RUN a2dissite 000-default.conf && \
-    a2ensite sosmed.conf
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer -o composer-setup.php && \
+    php composer-setup.php --install-dir=/usr/local/bin --filename=composer && \
+    rm composer-setup.php
+
+# Create application directory
+RUN mkdir -p /var/www/sosmed
 WORKDIR /var/www/sosmed
-RUN ./install.sh
-RUN chown www-data:www-data /var/www/sosmed -R
-RUN chmod -R 755 /var/www/sosmed
+
+# Copy application files
+COPY . /var/www/sosmed/
+
+# Copy Apache configuration
+COPY sosmed.conf /etc/apache2/sites-available/
+
+# Configure Apache
+RUN a2dissite 000-default.conf && \
+    a2ensite sosmed.conf && \
+    a2enmod rewrite
+
+# Install dependencies and setup application
+RUN npm install && \
+    npm run build && \
+    composer install --no-dev --optimize-autoloader && \
+    cp .env.example .env && \
+    php artisan key:generate
+
+# Set permissions
+RUN chown -R www-data:www-data /var/www/sosmed && \
+    chmod -R 755 /var/www/sosmed && \
+    chmod -R 775 /var/www/sosmed/storage && \
+    chmod -R 775 /var/www/sosmed/bootstrap/cache
+
+# Create entrypoint script
+RUN echo '#!/bin/bash\n\
+# Update database configuration from environment variables\n\
+if [ ! -z "$DB_HOST" ]; then\n\
+    sed -i "s/DB_HOST=.*/DB_HOST=$DB_HOST/g" .env\n\
+fi\n\
+if [ ! -z "$DB_DATABASE" ]; then\n\
+    sed -i "s/DB_DATABASE=.*/DB_DATABASE=$DB_DATABASE/g" .env\n\
+fi\n\
+if [ ! -z "$DB_USERNAME" ]; then\n\
+    sed -i "s/DB_USERNAME=.*/DB_USERNAME=$DB_USERNAME/g" .env\n\
+fi\n\
+if [ ! -z "$DB_PASSWORD" ]; then\n\
+    sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=$DB_PASSWORD/g" .env\n\
+fi\n\
+\n\
+# Wait for database to be ready\n\
+echo "Waiting for database..."\n\
+sleep 10\n\
+\n\
+# Run migrations and seeders\n\
+php artisan migrate --force\n\
+php artisan db:seed --force\n\
+php artisan storage:link\n\
+\n\
+# Start the application\n\
+php artisan serve --host=0.0.0.0 --port=8000\n\
+' > /entrypoint.sh && chmod +x /entrypoint.sh
+
 EXPOSE 8000
-CMD php artisan serve --host=0.0.0.0 --port=8000
+
+CMD ["/entrypoint.sh"]

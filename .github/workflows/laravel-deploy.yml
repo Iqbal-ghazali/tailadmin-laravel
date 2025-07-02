@@ -1,48 +1,81 @@
 name: Laravel application (Mysql)
-run-name: Build, Push and Deploy image simple social media
+run-name: Build, Push and Deploy tailadmin-laravel
 on:
   push:
     branches:
       - main
 env:
-  IMAGE_NAME: "iqbal508-tailadmin-laravel:latest"
+  IMAGE_NAME: "${{ secrets.DOCKER_USER }}-tailadmin-laravel:beta"
   DOCKER_USER: "${{ secrets.DOCKER_USER }}"
 jobs:
-  run-mysql-in-docker:
-    runs-on: self-hosted
-    steps:
-      - name: Delete container mysql if exist
-        continue-on-error: true
-        run: docker rm -f $(docker ps -a | grep 'mysql\|social\|media' | awk '{print $1}')
-      - name: Running mysql in container
-        run:  docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=social_media -p 3306:3306 mysql:5.7
-      - name: List docker container
-        run: docker ps -a
   build-push-image:
-    needs: run-mysql-in-docker
     runs-on: self-hosted
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
+      
       - name: Build Image
-        run: docker build -t $IMAGE_NAME .
+        run: docker build -t $IMAGE_NAME -f Dockerfile .
+      
       - name: List Image
         run: docker image ls
+      
       - name: Login to Docker Registry
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_PASS }}
+     
       - name: Push Image
         run: docker push $IMAGE_NAME
 
-  deploy-social-media:
+  deploy-tailadmin-laravel:
     needs: build-push-image
     runs-on: self-hosted
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
-      - name: stop and remove existing container
-        run: docker compose down --rmi all
-      - name: start container
-        run: docker compose up -d
+      
+      - name: Stop and remove existing containers
+        continue-on-error: true
+        run: |
+          docker stop tailadmin-laravel-app tailadmin-mysql || true
+          docker rm tailadmin-laravel-app tailadmin-mysql || true
+      
+      - name: Create Docker network
+        continue-on-error: true
+        run: docker network create tailadmin-network
+      
+      - name: Run MySQL container
+        run: |
+          docker run -d \
+            --name tailadmin-mysql \
+            --network tailadmin-network \
+            -e MYSQL_ROOT_PASSWORD=password \
+            -e MYSQL_DATABASE=social_media \
+            -e MYSQL_USER=laravel \
+            -e MYSQL_PASSWORD=password \
+            -p 3307:3306 \
+            mysql:5.7
+      
+      - name: Wait for MySQL to be ready
+        run: |
+          echo "Waiting for MySQL to be ready..."
+          sleep 30
+      
+      - name: Run Laravel application
+        run: |
+          docker run -d \
+            --name tailadmin-laravel-app \
+            --network tailadmin-network \
+            -p 8090:8000 \
+            -e DB_HOST=tailadmin-mysql \
+            -e DB_DATABASE=social_media \
+            -e DB_USERNAME=laravel \
+            -e DB_PASSWORD=password \
+            $IMAGE_NAME
+      
+      - name: Check container status
+        run: |
+          docker ps -a
+          echo "Application is running on port 8090"
