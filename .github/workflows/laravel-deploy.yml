@@ -13,19 +13,35 @@ jobs:
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
-      
+
+      - name: Test DNS and connectivity
+        run: |
+          echo "Testing DNS resolution..."
+          nslookup registry-1.docker.io || true
+          ping -c 2 registry-1.docker.io || true
+          echo "Docker info:"
+          docker info
+
+      - name: Pull base image first
+        run: |
+          docker pull ubuntu:22.04 || echo "Failed to pull, will retry with alternate registry"
+
       - name: Build Image
-        run: docker build -t $IMAGE_NAME -f Dockerfile .
-      
+        run: |
+          # Try building with explicit platform
+          docker build --network=host -t $IMAGE_NAME -f Dockerfile . || \
+          # If fails, try with buildkit disabled
+          DOCKER_BUILDKIT=0 docker build -t $IMAGE_NAME -f Dockerfile .
+
       - name: List Image
         run: docker image ls
-      
+
       - name: Login to Docker Registry
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_PASS }}
-     
+
       - name: Push Image
         run: docker push $IMAGE_NAME
 
@@ -35,17 +51,17 @@ jobs:
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
-      
+
       - name: Stop and remove existing containers
         continue-on-error: true
         run: |
           docker stop tailadmin-laravel-app tailadmin-mysql || true
           docker rm tailadmin-laravel-app tailadmin-mysql || true
-      
+
       - name: Create Docker network
         continue-on-error: true
         run: docker network create tailadmin-network
-      
+
       - name: Run MySQL container
         run: |
           docker run -d \
@@ -57,12 +73,12 @@ jobs:
             -e MYSQL_PASSWORD=password \
             -p 3307:3306 \
             mysql:5.7
-      
+
       - name: Wait for MySQL to be ready
         run: |
           echo "Waiting for MySQL to be ready..."
           sleep 30
-      
+
       - name: Run Laravel application
         run: |
           docker run -d \
@@ -74,7 +90,7 @@ jobs:
             -e DB_USERNAME=laravel \
             -e DB_PASSWORD=password \
             $IMAGE_NAME
-      
+
       - name: Check container status
         run: |
           docker ps -a

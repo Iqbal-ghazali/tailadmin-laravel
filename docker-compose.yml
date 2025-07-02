@@ -1,47 +1,94 @@
-version: '3.8'
+# Use a mirror or alternate registry if needed
+# FROM mirror.gcr.io/ubuntu:22.04
+FROM ubuntu:22.04
 
-services:
-  tailadmin-app:
-    image: ${DOCKER_USER}-tailadmin-laravel:beta
-    container_name: tailadmin-laravel-app
-    ports:
-      - "8090:8000"
-    environment:
-      - DB_HOST=tailadmin-mysql
-      - DB_DATABASE=social_media
-      - DB_USERNAME=laravel
-      - DB_PASSWORD=password
-    depends_on:
-      - tailadmin-mysql
-    networks:
-      - tailadmin-network
-    restart: unless-stopped
+# Configure apt to use a reliable mirror
+RUN echo "Acquire::http::Timeout \"10\";" > /etc/apt/apt.conf.d/99timeout && \
+    echo "Acquire::Retries \"3\";" >> /etc/apt/apt.conf.d/99timeout
 
-  tailadmin-mysql:
-    image: mysql:5.7
-    container_name: tailadmin-mysql
-    ports:
-      - "3307:3306"
-    environment:
-      - MYSQL_ROOT_PASSWORD=password
-      - MYSQL_DATABASE=social_media
-      - MYSQL_USER=laravel
-      - MYSQL_PASSWORD=password
-    volumes:
-      - tailadmin_mysql_data:/var/lib/mysql
-    networks:
-      - tailadmin-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+# Install dependencies with retry logic
+RUN apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    apache2 \
+    php \
+    php-xml \
+    php-mbstring \
+    php-curl \
+    php-mysql \
+    php-gd \
+    php-bcmath \
+    php-json \
+    php-zip \
+    npm \
+    unzip \
+    nano \
+    curl \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-networks:
-  tailadmin-network:
-    driver: bridge
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer -o composer-setup.php && \
+    php composer-setup.php --install-dir=/usr/local/bin --filename=composer && \
+    rm composer-setup.php
 
-volumes:
-  tailadmin_mysql_data:
-    driver: local
+# Create application directory
+RUN mkdir -p /var/www/sosmed
+WORKDIR /var/www/sosmed
+
+# Copy application files
+COPY . /var/www/sosmed/
+
+# Copy Apache configuration
+COPY sosmed.conf /etc/apache2/sites-available/
+
+# Configure Apache
+RUN a2dissite 000-default.conf && \
+    a2ensite sosmed.conf && \
+    a2enmod rewrite
+
+# Install dependencies and setup application
+RUN npm install && \
+    npm run build && \
+    composer install --no-dev --optimize-autoloader && \
+    cp .env.example .env && \
+    php artisan key:generate
+
+# Set permissions
+RUN chown -R www-data:www-data /var/www/sosmed && \
+    chmod -R 755 /var/www/sosmed && \
+    chmod -R 775 /var/www/sosmed/storage && \
+    chmod -R 775 /var/www/sosmed/bootstrap/cache
+
+# Create entrypoint script
+RUN echo '#!/bin/bash\n\
+# Update database configuration from environment variables\n\
+if [ ! -z "$DB_HOST" ]; then\n\
+    sed -i "s/DB_HOST=.*/DB_HOST=$DB_HOST/g" .env\n\
+fi\n\
+if [ ! -z "$DB_DATABASE" ]; then\n\
+    sed -i "s/DB_DATABASE=.*/DB_DATABASE=$DB_DATABASE/g" .env\n\
+fi\n\
+if [ ! -z "$DB_USERNAME" ]; then\n\
+    sed -i "s/DB_USERNAME=.*/DB_USERNAME=$DB_USERNAME/g" .env\n\
+fi\n\
+if [ ! -z "$DB_PASSWORD" ]; then\n\
+    sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=$DB_PASSWORD/g" .env\n\
+fi\n\
+\n\
+# Wait for database to be ready\n\
+echo "Waiting for database..."\n\
+sleep 10\n\
+\n\
+# Run migrations and seeders\n\
+php artisan migrate --force\n\
+php artisan db:seed --force\n\
+php artisan storage:link\n\
+\n\
+# Start the application\n\
+php artisan serve --host=0.0.0.0 --port=8000\n\
+' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+EXPOSE 8000
+
+CMD ["/entrypoint.sh"]
